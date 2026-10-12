@@ -4,7 +4,7 @@ import time
 
 from picarx import Picarx
 
-VITESSE = 30  # vitesse moteur (0-100)
+VITESSE = 50  # vitesse moteur (0-100)
 
 px = Picarx()
 
