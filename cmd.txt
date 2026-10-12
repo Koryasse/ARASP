@@ -1,8 +1,15 @@
 sudo apt update
 sudo apt install git python3-pip python3-setuptools python3-smbus
+
+# Ancien SunFounder PiCar : installer le module "picar"
 cd ~
-git clone -b v2.0 https://github.com/sunfounder/robot-hat.git --depth 1
-cd robot-hat && sudo python3 install.py
+git clone https://github.com/sunfounder/SunFounder_PiCar.git
+cd SunFounder_PiCar
+sudo python3 setup.py install
+
+# Recuperer le module de suivi de ligne utilise par le script
 cd ~
-git clone -b v2.0 https://github.com/sunfounder/picar-x.git --depth 1
-cd picar-x && sudo python3 setup.py install
+git clone --recursive https://github.com/sunfounder/SunFounder_PiCar-S.git
+
+# Depuis le Raspberry Pi, lancer le script avec le module de capteurs
+sudo env PYTHONPATH="$HOME/SunFounder_PiCar-S/example" python3 "$HOME/ARASP/avancer-test.py"
