@@ -2,7 +2,10 @@
 """Fait avancer le SunFounder PiCar-X en ligne droite jusqu'à Ctrl+C."""
 import time
 
-from picarx import Picarx
+from importlib import import_module
+
+# picarx is provided by the PiCar-X environment, not by the standard Python install.
+Picarx = import_module("picarx").Picarx
 
 VITESSE = 50  # vitesse moteur (0-100)
 
