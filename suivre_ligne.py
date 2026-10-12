@@ -1,88 +1,112 @@
-#!/usr/bin/env python3
-"""
-Suiveur de ligne noire - SunFounder PiCar-X
-Usage :
-    python3 suiveur_ligne.py          -> suivi de ligne
-    python3 suiveur_ligne.py --calib  -> affiche les valeurs brutes des capteurs
-"""
-import sys
 import time
-from picarx import Picarx
+import picar
+from picar import back_wheels
+from SunFounder_Line_Follower import Line_Follower
 
-# ---------------- Réglages (à ajuster) ----------------
-BLANC = [1500, 1500, 1500]  # valeurs capteurs [gauche, milieu, droite] sur fond clair
-NOIR = [300, 300, 300]      # valeurs capteurs sur la ligne noire
+picar.setup()
 
-VITESSE_MAX = 30     # vitesse en ligne droite (0-100)
-VITESSE_MIN = 15     # vitesse dans les virages serrés
-ANGLE_MAX = 30       # braquage max du servo (degrés)
-KP = 1.0             # gain de correction (augmenter si la voiture tourne trop peu)
-SEUIL_PERDU = 0.3    # en dessous : la ligne n'est plus détectée
-TIMEOUT_PERDU = 2.0  # secondes de recherche avant arrêt
-PERIODE = 0.01       # pause de la boucle (s)
-# ------------------------------------------------------
+# ---------- Initialisation ----------
+lf = Line_Follower.Line_Follower()
+bw = back_wheels.Back_Wheels()
+bw.ready()
 
-px = Picarx()
+# ---------- Réglages ----------
+VITESSE_BASE = 40          # vitesse quand la ligne est centrée
+GAIN = 25                  # force de la correction (plus grand = tourne plus fort)
+VITESSE_MAX = 80           # limite de vitesse d'une roue
+TEMPS_PERDU_MAX = 2.0      # secondes sans voir la ligne avant arrêt
+VITESSE_RECHERCHE = 40     # vitesse du pivot quand la ligne est perdue
+INVERSER_DIRECTION = True  # mettre False si le robot tourne du mauvais côté
 
+# Poids de chaque capteur : plus il est loin du centre, plus on tourne fort
+# [extrême gauche, gauche, centre, droite, extrême droite]
+POIDS = [-2, -1, 0, 1, 2]
 
-def noirceur(valeurs):
-    """Convertit les valeurs brutes en 0.0 (blanc) -> 1.0 (noir) pour chaque capteur."""
-    resultat = []
-    for v, b, n in zip(valeurs, BLANC, NOIR):
-        x = (b - v) / (b - n) if b != n else 0.0
-        resultat.append(min(max(x, 0.0), 1.0))
-    return resultat
+# ---------- Moteurs ----------
+def regler_roue(roue, v):
+    """v > 0 : avance, v < 0 : recule."""
+    v = max(-VITESSE_MAX, min(VITESSE_MAX, int(v)))
+    roue.speed = abs(v)
+    if v >= 0:
+        roue.forward()
+    else:
+        roue.backward()
+    return v
 
+def moteurs(vg, vd):
+    vg = regler_roue(bw.left_wheel, vg)
+    vd = regler_roue(bw.right_wheel, vd)
+    return vg, vd
 
-def calibration():
-    print("Place chaque capteur sur le blanc puis sur la ligne noire.")
-    print("Note les valeurs et reporte-les dans BLANC / NOIR. Ctrl+C pour quitter.")
+def stopper():
+    bw.stop()
+
+# ---------- Calibration ----------
+def calibrer():
+    input("Placez les capteurs sur une surface CLAIRE, puis Entrée...")
+    clair = lf.read_analog()
+    input("Placez les capteurs sur la LIGNE NOIRE, puis Entrée...")
+    sombre = lf.read_analog()
+
+    lf.references = [(c + s) // 2 for c, s in zip(clair, sombre)]
+    print("Clair :", clair)
+    print("Sombre:", sombre)
+    print("Seuils:", lf.references)
+
+    etat = lf.read_digital()
+    niveau_ligne = 1 if sum(etat) >= 3 else 0
+    print("Sur la ligne, read_digital() donne :", etat, "-> ligne =", niveau_ligne)
+    return niveau_ligne
+
+# ---------- Suivi de ligne proportionnel ----------
+def suivre_ligne(niveau_ligne):
+    derniere_erreur = 0.0
+    dernier_vu = time.time()
+    debut = time.time()
+    dernier_affiche = None
+
     while True:
-        print(px.get_grayscale_data())
-        time.sleep(0.2)
+        brut = lf.read_digital()
+        s = [1 if x == niveau_ligne else 0 for x in brut]
+        if INVERSER_DIRECTION:
+            s = s[::-1]
 
-
-def suivre_ligne():
-    derniere_pos = 0.0
-    perdu_depuis = None
-
-    while True:
-        g, m, d = noirceur(px.get_grayscale_data())
-        total = g + m + d
-
-        if total >= SEUIL_PERDU:
-            # Ligne visible : position de -1 (ligne à gauche) à +1 (ligne à droite)
-            perdu_depuis = None
-            pos = (d - g) / total
-            derniere_pos = pos
-
-            angle = max(-ANGLE_MAX, min(ANGLE_MAX, KP * pos * ANGLE_MAX))
-            vitesse = VITESSE_MAX - (VITESSE_MAX - VITESSE_MIN) * abs(pos)
-
-            px.set_dir_servo_angle(angle)
-            px.forward(int(vitesse))
-        else:
-            # Ligne perdue : on braque du côté où on l'a vue en dernier
-            if perdu_depuis is None:
-                perdu_depuis = time.time()
-            if time.time() - perdu_depuis > TIMEOUT_PERDU:
-                px.stop()
+        if sum(s) == 0:
+            # Ligne perdue : on pivote du côté où elle a disparu
+            if time.time() - dernier_vu > TEMPS_PERDU_MAX:
+                stopper()
                 print("Ligne perdue, arrêt.")
                 return
-            px.set_dir_servo_angle(ANGLE_MAX if derniere_pos > 0 else -ANGLE_MAX)
-            px.forward(VITESSE_MIN)
+            if derniere_erreur < 0:
+                vg, vd = moteurs(-VITESSE_RECHERCHE, VITESSE_RECHERCHE)
+            elif derniere_erreur > 0:
+                vg, vd = moteurs(VITESSE_RECHERCHE, -VITESSE_RECHERCHE)
+            else:
+                stopper(); vg, vd = 0, 0
+            erreur = derniere_erreur
+        else:
+            dernier_vu = time.time()
+            # Position moyenne de la ligne : de -2 (très à gauche) à +2 (très à droite)
+            erreur = sum(p * x for p, x in zip(POIDS, s)) / sum(s)
+            derniere_erreur = erreur
+            # Plus l'erreur est grande, plus la différence entre les roues augmente
+            vg, vd = moteurs(VITESSE_BASE + GAIN * erreur,
+                             VITESSE_BASE - GAIN * erreur)
 
-        time.sleep(PERIODE)
+        if brut != dernier_affiche:
+            print(f"{time.time() - debut:7.2f}s  {brut}  erreur={erreur:+.2f}  G={vg:+d} D={vd:+d}")
+            dernier_affiche = brut
 
+        time.sleep(0.02)
 
+# ---------- Programme principal ----------
 if __name__ == "__main__":
     try:
-        if "--calib" in sys.argv:
-            calibration()
-        else:
-            suivre_ligne()
+        niveau = calibrer()
+        input("Posez le robot sur la ligne, puis Entrée pour démarrer (Ctrl+C pour stopper)...")
+        suivre_ligne(niveau)
     except KeyboardInterrupt:
-        print("\nArrêt demandé.")
+        print("Arrêt demandé.")
     finally:
-        px.set_dir_servo_angle(0)
-        px.stop()
+        stopper()
+        print("Moteurs arrêtés.")
